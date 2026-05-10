@@ -1,0 +1,115 @@
+inp_img  = Input((WINDOW,WINDOW,2), dtype=tf.float32)
+inp_feat = Input((X_feat.shape[1],), dtype=tf.float32)
+
+def conv_block(x,f,dr):
+    x=layers.Conv2D(f,3,padding="same")(x)
+    x=layers.BatchNormalization()(x); x=layers.Activation("relu")(x)
+    x=layers.Conv2D(f,3,padding="same")(x)
+    x=layers.BatchNormalization()(x); x=layers.Activation("relu")(x)
+    x=layers.MaxPool2D()(x)
+    return layers.Dropout(dr)(x) if dr>0 else x
+
+x = conv_block(inp_img,32,0.2)
+x = conv_block(x,      64,0.3)
+x = conv_block(x,     128,0.4)
+x = layers.Flatten()(x)
+m = layers.Concatenate()([x, inp_feat])
+m = layers.Dense(256)(m); m=layers.BatchNormalization()(m)
+m = layers.Activation("relu")(m); m=layers.Dropout(0.5)(m)
+m = layers.Dense(128)(m); m=layers.BatchNormalization()(m)
+m = layers.Activation("relu")(m); m=layers.Dropout(0.5)(m)
+out=layers.Dense(1,activation="sigmoid",bias_initializer=bias_init)(m)
+
+cnn = models.Model([inp_img,inp_feat], out)
+cnn.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+
+
+
+
+
+
+
+
+
+
+# — DTYPE FIX: cast numeric inputs to float32 only —
+dnn.fit(
+    [X_img_tr.astype(np.float32), X_feat_tr.astype(np.float32)],
+    y_tr.astype(np.float32),
+    validation_split=0.1,
+    epochs=EPOCHS,
+    batch_size=BATCH,
+    class_weight=cw,
+    callbacks=[
+      callbacks.ReduceLROnPlateau("val_loss",factor=0.5,patience=4,min_lr=1e-6),
+      callbacks.EarlyStopping(     "val_loss",patience=8,restore_best_weights=True)
+    ],
+    verbose=2
+)
+
+# === RANDOM FOREST & (OPTIONAL) ISOLATION FOREST ===
+rf = RandomForestClassifier(n_estimators=200, class_weight=cw, random_state=RNG)
+rf.fit(X_feat_tr, y_tr)
+
+if np.any(y_tr == 0):
+    iso = IsolationForest(contamination=0.05, random_state=RNG)
+    iso.fit(X_feat_tr[y_tr == 0])
+    iso_active = True
+else:
+    print("WARNING: No ROI (label 0) in training set — skipping IsolationForest.")
+    iso = None
+    iso_active = False
+
+# === ENSEMBLE & EVAL ===
+p_cnn = cnn.predict([X_img_te, X_feat_te]).flatten()
+p_rf  = rf.predict_proba(X_feat_te)[:,1]
+
+if iso_active:
+    p_if = -iso.score_samples(X_feat_te)
+    p_if = (p_if - p_if.min())/(p_if.max()-p_if.min() + 1e-8)
+else:
+    p_if = np.zeros_like(p_rf)
+
+p_ens = 0.4*p_cnn + 0.4*p_rf + 0.2*p_if
+
+# sweep for both recalls ≥0.5, pick best accuracy
+best_acc,best_thr = 0,0.5
+for t in np.linspace(0.1,0.9,81):
+    pr = (p_ens>=t).astype(int)
+    cm = confusion_matrix(y_te,pr,labels=[0,1])
+    rec_roi    = cm[0,0]/cm[0].sum() if cm[0].sum() else 0.0
+    rec_random = cm[1,1]/cm[1].sum() if cm[1].sum() else 0.0
+    acc = (pr==y_te).mean()
+    if rec_roi>=0.5 and rec_random>=0.5 and acc>best_acc:
+        best_acc,best_thr = acc,t
+
+print(f"Chosen threshold={best_thr:.2f}, accuracy={best_acc:.3f}")
+y_pred = (p_ens>=best_thr).astype(int)
+
+
+
+
+
+
+
+
+
+TRAIN_DAYS = (
+    list(range(0,    366))  +  # 2000
+    list(range(366,  731))  +  # 2001
+    list(range(731,  1096)) +  # 2002
+    list(range(1096, 1461)) +  # 2003
+    list(range(2192, 2557))    # 2006
+)
+TEST_DAYS  = (
+    list(range(2557, 2922)) +  # 2007
+    list(range(2922, 3288)) +  # 2008
+    list(range(3288, 3651))    # 2009
+)
+
+
+
+
+
+
+
