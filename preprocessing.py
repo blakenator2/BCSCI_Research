@@ -5,12 +5,9 @@ from skimage.feature import graycomatrix, graycoprops
 from sklearn.cluster         import KMeans
 from sklearn.preprocessing   import StandardScaler
 from sklearn.utils           import class_weight
-from sklearn.ensemble        import RandomForestClassifier, IsolationForest
 from sklearn.metrics         import classification_report, confusion_matrix, f1_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.utils.class_weight import compute_class_weight
-from numba import jit
-from multiprocessing import Pool, cpu_count
 from functools import partial
 import pandas as pd
 import numpy as np
@@ -69,7 +66,6 @@ def load_grids(day):
     W = pd.read_csv(f"wind/day{day}.txt",    sep=r"\s+", header=None).values.astype(np.float32)
     return P, W
 
-@jit(nopython=True, cache=True)
 def extract_window_safe(arr, x, y_idx, corner_idx, H, W):
     """Extract 25x25 window with boundary handling"""
     if corner_idx == 0:  # NW
@@ -114,7 +110,6 @@ def extract_window_safe(arr, x, y_idx, corner_idx, H, W):
     
     return result
 
-@jit(nopython=True, cache=True)
 def compute_basic_features(pwin, wwin, psx, psy, wsx, wsy):
     """Compute basic statistical features"""
     pmean = np.mean(pwin)
@@ -143,7 +138,6 @@ def tex_fast(mat):
         graycoprops(G, 'energy')[0,0]
     ]
 
-@jit(nopython=True, cache=True)
 def get_region_code(x, y):
     """Return region index 0-8"""
     if y >= 50:
@@ -231,9 +225,6 @@ def process_day(day, roi_df_subset):
 # Calculate ms and NUM_WORKERS inside the main block
 if __name__ == '__main__':
     ms = int(round(time.time() * 1000))
-    NUM_WORKERS = 5 #max(1, cpu_count() - 1)
-
-    print(f"Using {NUM_WORKERS} worker processes")
 
     # Load ROI data
     roi_df = pd.read_csv("roi_data_with_status.csv")
@@ -242,30 +233,22 @@ if __name__ == '__main__':
         raise RuntimeError(f"roi_data_with_status.csv must contain columns: {required}")
 
     # === PARALLEL COLLECTION ===
-    print("Collecting patches and features in parallel...")
+    print("Collecting patches and features...")
     start_time = time.time()
 
     # Filter days
-    valid_days = []
-    for day in ALL_DAYS:
-        prev = day - 1
-        if prev >= min(ALL_DAYS):
-            valid_days.append(day)
+    valid_days = [day for day in ALL_DAYS if day > 0]
 
-    # Create partial function with roi_df baked in
-    process_day_with_roi = partial(process_day, roi_df_subset=roi_df)
+    results = []
+    for i, day in enumerate(valid_days):
+        result = process_day(day, roi_df)
+        if result is not None:
+            results.append(result)
+        if (i + 1) % 5 == 0:
+            elapsed = time.time() - start_time
+            print(f"Processed {i + 1}/{len(valid_days)} days in {elapsed:.1f}s ({elapsed/(i+1):.2f}s per day)")
 
-    # Process in parallel
-    with Pool(processes=NUM_WORKERS) as pool:
-        results = []
-        for i, result in enumerate(pool.imap(process_day_with_roi, valid_days)):
-            if result is not None:
-                results.append(result)
-            if (i + 1) % 5 == 0:
-                elapsed = time.time() - start_time
-                print(f"Processed {i + 1}/{len(valid_days)} days in {elapsed:.1f}s ({elapsed/(i+1):.2f}s per day)")
-
-    print(f"Parallel processing complete in {time.time()-start_time:.1f}s")
+    print(f"Processing complete in {time.time()-start_time:.1f}s")
 
     print("Merging results...")
     img_patches = np.vstack([r['img_patches'] for r in results])
