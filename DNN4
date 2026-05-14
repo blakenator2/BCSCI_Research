@@ -1,5 +1,3 @@
-import os
-import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -8,11 +6,10 @@ from sklearn.cluster         import KMeans
 from sklearn.preprocessing   import StandardScaler
 from sklearn.metrics         import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
-from numba import jit
 import pickle
 
 import tensorflow as tf
-from tensorflow.keras        import layers, models, Input, callbacks
+from tensorflow.keras        import models, Input
 import matplotlib.patches    as mpatches
 import matplotlib.colors     as mcolors
 
@@ -20,12 +17,10 @@ WINDOW, HALF = 25, 24
 TRAIN_DAYS = list(range(1030, 1300))
 TEST_DAYS  = list(range(1301, 1401))
 ALL_DAYS   = TRAIN_DAYS + TEST_DAYS
-STEP       = 3
 RNG        = 42
 KM         = 10
 EPOCHS     = 40
 BATCH      = 128
-RND_WEIGHT = 2.0
 REGIONS9   = ["NW","N","NE","W","C","E","SW","S","SE"]
 ROI_TYPES  = ["COL","CL","COH","NROI"]
 TYPE_COLORS = {"COL":"red","CL":"blue","COH":"green","NROI":"orange"}

@@ -2,8 +2,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches    as mpatches
 import matplotlib.colors     as mcolors
 from skimage.draw    import polygon
-from scipy           import ndimage as ndi
-from skimage.feature import graycomatrix, graycoprops
 import pandas as pd
 import numpy as np
 import pickle
@@ -22,13 +20,6 @@ TEST_DAYS  = (
     list(range(3288, 3651))    # 2009
 )
 ALL_DAYS   = TRAIN_DAYS + TEST_DAYS
-STEP       = 3
-RNG        = 42
-KM         = 10
-EPOCHS     = 40
-BATCH      = 128
-RND_WEIGHT = 2.0
-REGIONS9   = ["NW","N","NE","W","C","E","SW","S","SE"]
 ROI_TYPES  = ["COL","CL","COH","NROI"]
 TYPE_COLORS = {"COL":"red","CL":"blue","COH":"green","NROI":"orange"}
 

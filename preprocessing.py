@@ -26,11 +26,7 @@ TEST_DAYS  = (
     list(range(3288, 3651))    # 2009
 )
 ALL_DAYS   = TRAIN_DAYS + TEST_DAYS
-STEP       = 3
-RNG        = 42
-KM         = 10
-EPOCHS     = 40
-BATCH      = 128
+STEP       = 1
 RND_WEIGHT = 2.0
 REGIONS9   = ["NW","N","NE","W","C","E","SW","S","SE"]
 ROI_TYPES  = ["COL","CL","COH","NROI"]
