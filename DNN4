@@ -4,18 +4,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from skimage.draw    import polygon
-from scipy           import ndimage as ndi
-from skimage.feature import graycomatrix, graycoprops
 from sklearn.cluster         import KMeans
 from sklearn.preprocessing   import StandardScaler
-from sklearn.utils           import class_weight
-from sklearn.ensemble        import RandomForestClassifier, IsolationForest
 from sklearn.metrics         import classification_report, confusion_matrix, f1_score
-from sklearn.neural_network import MLPClassifier
 from sklearn.utils.class_weight import compute_class_weight
 from numba import jit
-from multiprocessing import Pool, cpu_count
-from functools import partial
+import pickle
 
 import tensorflow as tf
 from tensorflow.keras        import layers, models, Input, callbacks
@@ -23,8 +17,8 @@ import matplotlib.patches    as mpatches
 import matplotlib.colors     as mcolors
 
 WINDOW, HALF = 25, 24
-TRAIN_DAYS = list(range(1230, 1300))
-TEST_DAYS  = list(range(1301, 1330))
+TRAIN_DAYS = list(range(1030, 1300))
+TEST_DAYS  = list(range(1301, 1401))
 ALL_DAYS   = TRAIN_DAYS + TEST_DAYS
 STEP       = 3
 RNG        = 42
@@ -36,8 +30,51 @@ REGIONS9   = ["NW","N","NE","W","C","E","SW","S","SE"]
 ROI_TYPES  = ["COL","CL","COH","NROI"]
 TYPE_COLORS = {"COL":"red","CL":"blue","COH":"green","NROI":"orange"}
 
-# === CONVERT TO FINAL FORMAT ===
-X_img = img_patches
+def create_roi_mask(df, day, shape):
+    mask = np.zeros(shape, dtype=np.int8)
+    day_data = df[df["Day"]==day]
+    for name, grp in day_data.groupby("Name"):
+        pts = grp[["x","y"]].values
+        if len(pts)<3:
+            continue
+        xs, ys = pts[:,0].astype(np.int32), pts[:,1].astype(np.int32)
+        rows = (shape[0]-1) - ys
+        cols = xs
+        rr, cc = polygon(rows, cols, shape=shape)
+        code = ROI_TYPES.index(grp["Label"].iat[0]) + 1
+        mask[rr,cc] = code
+    return mask
+
+def load_grids(day):
+    P = pd.read_csv(f"pressure/day{day}.txt", sep=r"\s+", header=None).values.astype(np.float32)
+    W = pd.read_csv(f"wind/day{day}.txt",    sep=r"\s+", header=None).values.astype(np.float32)
+    return P, W
+
+type_to_label = {"COL": 0, "CL": 1, "COH": 2, "NROI": 3, "random": 4}
+label_to_type = {v: k for k, v in type_to_label.items()}
+
+cmap_types = mcolors.ListedColormap(["lightgrey"] + [TYPE_COLORS[t] for t in ROI_TYPES])
+type_code  = {t:i+1 for i,t in enumerate(ROI_TYPES)}
+
+roi_df = pd.read_csv("roi_data_with_status.csv")
+required = {"Day","Name","x","y","Label"}
+if not required.issubset(roi_df.columns):
+    raise RuntimeError(f"roi_data_with_status.csv must contain columns: {required}")
+
+with open('train_patches.pkl', 'rb') as f:
+        tr_data = pickle.load(f)
+
+with open('test_patches.pkl', 'rb') as f:
+        te_data = pickle.load(f)
+
+
+X_basic     = np.vstack([tr_data['X_basic'], te_data['X_basic']])
+y_all       = np.concatenate([tr_data['y_all'], te_data['y_all']])
+coords      = np.vstack([tr_data['coords'], te_data['coords']])
+types_arr   = np.concatenate([tr_data['types_arr'], te_data['types_arr']])
+regions_codes = np.concatenate([tr_data['regions_codes'], te_data['regions_codes']])
+days_arr    = np.concatenate([tr_data['days_arr'], te_data['days_arr']])
+days_arr_te = tr_data['days_arr']
 
 # Convert region codes to one-hot
 reg_ohe = np.zeros((len(regions_codes), 9), dtype=np.float32)
@@ -57,10 +94,9 @@ X_feat = np.hstack([X_basic, reg_ohe, clus_ohe, dists])
 X_feat = StandardScaler().fit_transform(X_feat).astype(np.float32)
 
 # === SPLIT BY DAY ===
-train_mask = np.isin(days_arr, TRAIN_DAYS) & (y_all !=4)
-test_mask  = np.isin(days_arr, TEST_DAYS) & (y_all !=4)
+train_mask = np.isin(days_arr, TRAIN_DAYS)
+test_mask  = np.isin(days_arr, TEST_DAYS) 
 
-X_img_tr,  X_img_te   = X_img [train_mask], X_img [test_mask]
 X_feat_tr, X_feat_te  = X_feat[train_mask], X_feat[test_mask]
 y_tr,      y_te       = y_all[train_mask],  y_all[test_mask]
 coords_tr, coords_te  = coords [train_mask], coords [test_mask]
@@ -74,9 +110,16 @@ print("Test  class counts:", np.bincount(y_te))
 classes_present = np.unique(y_tr)
 print("Classes present in y_tr:", classes_present)
 
-print(f"\nTotal time: {time.time()-start_time:.1f}s")
+weights = compute_class_weight(
+    class_weight='balanced', 
+    classes=np.unique(y_tr), 
+    y=y_tr
+)
+class_weight_dict = dict(zip(np.unique(y_tr), weights))
 
 # === BUILD & TRAIN DNN ===
+
+#Add bayseian classifier 
 
 # Define a Sequential DNN
 dnn = models.Sequential([
@@ -87,20 +130,21 @@ dnn = models.Sequential([
     tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(32, activation="relu"),
     tf.keras.layers.Dropout(0.2),
-    tf.keras.layers.Dense(4, activation="softmax"),
+    tf.keras.layers.Dense(5, activation="softmax"),
 ])
 
 # Compile model
 dnn.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
     loss= tf.keras.losses.SparseCategoricalCrossentropy(),
-    metrics=["accuracy"]
+    metrics=["accuracy"],
 )
 
 # Train model
 history = dnn.fit(
     X_feat_tr, y_tr,
     validation_data=(X_feat_te, y_te),
+    class_weight = class_weight_dict,
     epochs=EPOCHS,
     batch_size=BATCH,
     verbose=1
@@ -148,7 +192,7 @@ plt.tight_layout()
 plt.show()
 
 # 4x4 matrix (all ROI types including NROI)
-labels4 = ["COL", "COH", "CL", "NROI"]
+labels4 = ["COL", "COH", "CL", "NROI", "random"]
 cm_types_4 = confusion_matrix(true_types_strings, pred_types_strings, labels=labels4)
 
 plt.figure(figsize=(5, 4))
@@ -194,11 +238,11 @@ for day in TEST_DAYS:
     types_day  = types_te[sel]
     preds_day  = y_type_pred[sel]
 
+    # build predicted‐type mask: wherever we predicted ROI (label 0)
     pred_mask = np.zeros((H,W),dtype=int)
     for (x,y),tp,pr in zip(coords_day,types_day,preds_day):
-        pred_type = label_to_type[pr]
-        if (pr>=0 and pr<=3) and tp in type_code:
-            pred_mask[H-1-y, x] = type_code[pred_type]
+        if pr==0 and tp in type_code:            # only colour real ROI types
+            pred_mask[H-1-y, x] = type_code[tp]
 
     fig,(axT,axP) = plt.subplots(1,2,figsize=(10,5),sharex=True,sharey=True)
     axT.imshow(true_mask, cmap=cmap_types, origin="upper", vmin=0, vmax=len(ROI_TYPES))
