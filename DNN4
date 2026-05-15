@@ -62,6 +62,17 @@ with open('train_patches.pkl', 'rb') as f:
 with open('test_patches.pkl', 'rb') as f:
         te_data = pickle.load(f)
 
+#Sanity Check
+sample_day = tr_data['days_arr'][0]
+sample_coord = tr_data['coords'][0]
+x, y = sample_coord
+P_check, _ = load_grids(sample_day - 1)  # day-1 features
+row = P_check.shape[0] - 1 - y
+print(f"Label day: {sample_day}, Feature day: {sample_day - 1}")
+print(f"Direct P value from day-1 grid: {P_check[row, x]:.4f}")
+print(f"Stored feature value: {tr_data['X_basic'][0, 0]:.4f}")  # first feature of first sample
+print("Match:", np.isclose(P_check[row, x], tr_data['X_basic'][0, 0]))
+
 
 X_basic     = np.vstack([tr_data['X_basic'], te_data['X_basic']])
 y_all       = np.concatenate([tr_data['y_all'], te_data['y_all']])
@@ -186,8 +197,8 @@ for i in range(len(labels3)):
 plt.tight_layout()
 plt.show()
 
-# 4x4 matrix (all ROI types including NROI)
-labels4 = ["COL", "COH", "CL", "NROI", "random"]
+# 5x5 matrix (all ROI types including NROI)
+labels4 = ["COL", "COH", "CL", "NROI", "BG"]
 cm_types_4 = confusion_matrix(true_types_strings, pred_types_strings, labels=labels4)
 
 plt.figure(figsize=(5, 4))
@@ -236,7 +247,7 @@ for day in TEST_DAYS:
     # build predicted‐type mask: wherever we predicted ROI (label 0)
     pred_mask = np.zeros((H,W),dtype=int)
     for (x,y),tp,pr in zip(coords_day,types_day,preds_day):
-        if pr==0 and tp in type_code:            # only colour real ROI types
+        if pr!=4 and tp in type_code:            # only colour real ROI types
             pred_mask[H-1-y, x] = type_code[tp]
 
     fig,(axT,axP) = plt.subplots(1,2,figsize=(10,5),sharex=True,sharey=True)

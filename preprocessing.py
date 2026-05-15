@@ -42,8 +42,6 @@ def create_roi_mask(df, day, shape):
     day_data = df[df["Day"]==day]
     for name, grp in day_data.groupby("Name"):
         pts = grp[["x","y"]].values
-        if len(pts)<3:
-            continue
         xs, ys = pts[:,0].astype(np.int32), pts[:,1].astype(np.int32)
         rows = (shape[0]-1) - ys
         cols = xs
@@ -185,7 +183,7 @@ def process_day(day, roi_df_subset):
             code = mask[row, xr]
             is_roi = code > 0
             lbl = type_to_label[ROI_TYPES[code-1]] if is_roi else 4
-            rtype = ROI_TYPES[code-1] if is_roi else "random"
+            rtype = ROI_TYPES[code-1] if is_roi else "BG"
             
             psx, psy = P_sobel_x[row, xr], P_sobel_y[row, xr]
             wsx, wsy = W_sobel_x[row, xr], W_sobel_y[row, xr]
