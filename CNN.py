@@ -6,10 +6,11 @@ from sklearn.preprocessing   import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 import pickle
 from imblearn.under_sampling import RandomUnderSampler
+import h5py
 import math
 
 import tensorflow as tf
-from tensorflow.keras        import models, Input
+from tensorflow.keras        import Model, Input, layers
 import matplotlib.colors     as mcolors
 
 WINDOW, HALF = 25, 24
@@ -22,7 +23,7 @@ TEST_DAYS  = (
 ALL_DAYS   = TRAIN_DAYS + TEST_DAYS
 RNG        = 42
 KM         = 10
-EPOCHS     = 20
+EPOCHS     = 40
 BATCH      = 256
 META_FILE  = "patches_data.npz"
 IMG_FILE   = "patches_imgs.h5"
@@ -30,6 +31,37 @@ _SPLIT_KEYS = ["X_basic", "y_all", "coords", "types_arr", "regions_codes", "days
 REGIONS9   = ["NW","N","NE","W","C","E","SW","S","SE"]
 ROI_TYPES  = ["COL","CL","COH","NROI"]
 TYPE_COLORS = {"COL":"red","CL":"blue","COH":"green","NROI":"orange"}
+
+class PatchGenerator(tf.keras.utils.Sequence):
+    def __init__(self, h5_path, split, days_arr, day_list, X_feat, y, batch_size=256):
+        super().__init__()
+        self.h5_path    = h5_path
+        self.split      = split
+        self.X_feat     = X_feat
+        self.y          = y
+        self.batch_size = batch_size
+
+        idx = np.where(np.isin(days_arr, list(day_list)))[0]
+        self.start = int(idx[0])
+        self.end   = int(idx[-1]) + 1
+        self.n     = self.end - self.start
+
+    def __len__(self):
+        return int(np.ceil(self.n / self.batch_size))
+
+    def __getitem__(self, i):
+        bs    = self.batch_size
+        lo    = self.start + i * bs
+        hi    = min(self.start + (i + 1) * bs, self.end)
+        local = slice(lo - self.start, hi - self.start)
+
+        with h5py.File(self.h5_path, "r") as h5:
+            patches = h5[f"{self.split}_img_patches"][lo:hi]
+
+        return (
+            (patches, self.X_feat[local]),  # tuple not list
+            self.y[local]
+        )
 
 def create_roi_mask(df, day, shape):
     mask = np.zeros(shape, dtype=np.int8)
@@ -63,18 +95,6 @@ if not required.issubset(roi_df.columns):
     raise RuntimeError(f"roi_data_with_status.csv must contain columns: {required}")
 
 
-#Sanity Check
-# sample_day = tr_data['days_arr'][0]
-# sample_coord = tr_data['coords'][0]
-# x, y = sample_coord
-# P_check, _ = load_grids(sample_day - 1)
-# row = P_check.shape[0] - 1 - y
-
-# print(f"Label day: {sample_day}, Feature day: {sample_day - 1}")
-# print(f"Direct P[row,x] from day-1 grid: {P_check[row, x]:.4f}")
-# print(f"Stored pcenter (X_basic[0, 4]):  {tr_data['X_basic'][0, 4]:.4f}")
-# print("Match:", np.isclose(P_check[row, x], tr_data['X_basic'][0, 4]))
-
 raw = np.load(META_FILE, allow_pickle=True)
 tr_data = {k: raw[f"tr_{k}"] for k in _SPLIT_KEYS}
 te_data = {k: raw[f"te_{k}"] for k in _SPLIT_KEYS}
@@ -104,33 +124,19 @@ print("Running K-means clustering...")
 # dists = np.linalg.norm(X_basic - km.cluster_centers_[km.labels_], axis=1).reshape(-1, 1)
 
 # X_feat = np.hstack([X_basic, reg_ohe, clus_ohe, dists])
+# np.savez_compressed('X_feat.npz', x=X_feat)
 
 X_feat = np.load('X_feat.npz')['x']
+
 scaler = StandardScaler()
 X_feat_tr = scaler.fit_transform(X_feat[train_mask])
 X_feat_te = scaler.transform(X_feat[test_mask])
-
 
 # === SPLIT BY DAY === 
 y_tr,      y_te       = y_all[train_mask],  y_all[test_mask]
 coords_tr, coords_te  = coords [train_mask], coords [test_mask]
 types_tr,  types_te   = types_arr[train_mask], types_arr[test_mask]
 days_tr,   days_te    = days_arr[train_mask], days_arr[test_mask]
-
-# roi_count = (y_tr != 4).sum()
-
-# rus = RandomUnderSampler(
-#     sampling_strategy={
-#         0: int((y_tr == 0).sum()),  
-#         1: int((y_tr == 1).sum()),  
-#         2: int((y_tr == 2).sum()),  
-#         3: int((y_tr == 3).sum()),  
-#         4: roi_count * 20          
-#     },
-#     random_state=RNG
-# )
-
-# X_feat_tr_bal, y_tr_bal = rus.fit_resample(X_feat_tr, y_tr)
 
 print("Train class counts:", np.bincount(y_tr))
 print("Test  class counts:", np.bincount(y_te))
@@ -140,48 +146,65 @@ classes_present = np.unique(y_tr)
 
 print("Classes present in y_tr:", classes_present)
 
-#=== EARLY STOPPING FUNCTION ===
+# === EARLY STOPPING FUNCTION ===
 early_stopping = tf.keras.callbacks.EarlyStopping(
-    monitor='val_loss',   # Quantity to be monitored
-    patience=3,           # Epochs to wait after last improvement before stopping
-    restore_best_weights=True # Restores model weights from the best epoch
+    monitor='val_loss',   
+    patience=3,           
+    restore_best_weights=True,
+    start_from_epoch=5
 )
 
-# === BUILD & TRAIN DNN ===
+# === BUILD & TRAIN CNN ===
 
 #Make CM ROI based not per pixel
+patch_input = Input(shape=(25, 25, 2), name="patch_input")
+feat_input  = Input(shape=(X_feat_tr.shape[1],), name="feat_input")
 
-# Define a Sequential DNN
-dnn = models.Sequential([
-    Input(shape=(X_feat_tr.shape[1],)),      # input size = num features
-    tf.keras.layers.Dense(288, activation="sigmoid"),
-    tf.keras.layers.Dense(448, activation="sigmoid"),
-    tf.keras.layers.Dense(256, activation="sigmoid"),
-    tf.keras.layers.Dense(5, activation="softmax"),
-])
+x = layers.Conv2D(32, 3, activation="relu", padding="same")(patch_input)
+x = layers.Conv2D(32, 3, activation="relu", padding="same")(x)
+x = layers.MaxPooling2D()(x)
 
-# Compile model
-dnn.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-    loss= tf.keras.losses.SparseCategoricalCrossentropy(),
-    metrics=["accuracy"],
+x = layers.Conv2D(64, 3, activation="relu", padding="same")(x)
+
+x = layers.Flatten()(x)
+x = layers.Dense(64, activation="relu")(x)
+y = layers.Dropout(0.4)(x)
+y = layers.Dense(64, activation="relu")(feat_input)
+y = layers.Dropout(0.4)(y)
+y = layers.Dense(32, activation="relu")(y)
+y = layers.Dropout(0.4)(y)
+
+combined = layers.concatenate([x, y])
+combined = layers.Dense(128, activation="relu")(combined)
+combined = layers.Dropout(0.4)(combined)
+combined = layers.Dense(64, activation="relu")(combined)
+combined = layers.Dropout(0.4)(combined)
+output   = layers.Dense(5, activation="softmax")(combined)
+
+cnn = Model(inputs=[patch_input, feat_input], outputs=output)
+
+cnn.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+    metrics=["accuracy"]
 )
 
-# Train model
-history = dnn.fit(
-    X_feat_tr, y_tr,
-    validation_data=(X_feat_te, y_te),
+train_gen = PatchGenerator(IMG_FILE, "tr", tr_data['days_arr'], TRAIN_DAYS, X_feat_tr, y_tr, BATCH)
+test_gen  = PatchGenerator(IMG_FILE, "tr", tr_data['days_arr'], TEST_DAYS,  X_feat_te, y_te, BATCH)
+
+history = cnn.fit(
+    train_gen,
+    validation_data=test_gen,
     epochs=EPOCHS,
-    batch_size=BATCH,
-    callbacks=[early_stopping],   
+    callbacks=[early_stopping],
     verbose=1
 )
 
-dnn.save("DNN.keras")
-print('Saved DNN')
+cnn.save("CNN.keras")
+print('Saved CNN')
 
 # Evaluate on test set
-loss, acc = dnn.evaluate(X_feat_te, y_te, verbose=0)
+loss, acc = cnn.evaluate(test_gen, verbose=0)
 print(f"Test accuracy: {acc:.3f}")
 
 y_type_tr = np.array([type_to_label[t] for t in types_tr])

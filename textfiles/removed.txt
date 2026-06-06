@@ -107,9 +107,25 @@ TEST_DAYS  = (
     list(range(3288, 3651))    # 2009
 )
 
+CategoricalFocalCrossentropy(
+    alpha=0.25,
+    gamma=2.0,
+    label_smoothing=0.0,
+    axis=-1,
+    reduction='sum_over_batch_size',
+    name='categorical_focal_crossentropy'
+    ),
 
 
+class_weights = compute_class_weight(
+     class_weight="balanced",
+     classes=classes_present,
+     y=y_tr
+)
 
+for i in range(len(class_weights)):
+    class_weights[i] = math.sqrt(class_weights[i])
 
+class_weight_dict = dict(zip(classes_present, class_weights))
 
 
